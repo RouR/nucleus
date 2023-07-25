@@ -8,6 +8,7 @@ export interface Win32HelperOpts {
   arch: string;
   store: IFileStore;
   positioner: Positioner;
+  cachedFileSizes: Map<string, number>;
 }
 
 export const generateWin32ReleasesStructure = async ({
@@ -16,6 +17,7 @@ export const generateWin32ReleasesStructure = async ({
   arch,
   store,
   positioner,
+  cachedFileSizes,
 }: Win32HelperOpts, rollout = 100) => {
   const root = path.posix.join(app.slug, channel.id, 'win32', arch);
 
@@ -28,7 +30,14 @@ export const generateWin32ReleasesStructure = async ({
   for (const version of versions.sort((a, b) => semver.compare(a.name, b.name))) {
     for (const file of version.files) {
       if (file.fileName.endsWith('-full.nupkg') || file.fileName.endsWith('-delta.nupkg')) {
-        const fileSize = await store.getFileSize(positioner.getIndexKey(app, channel, version, file));
+        const indexKey = positioner.getIndexKey(app, channel, version, file);
+        let fileSize;
+        if (cachedFileSizes.has(indexKey)) {
+          fileSize = cachedFileSizes.get(indexKey);
+        } else {
+          fileSize = await store.getFileSize(indexKey);
+          cachedFileSizes.set(indexKey, fileSize);
+        }
         const absoluteUrl = `${await store.getPublicBaseUrl()}/${root}/${file.fileName}`;
         releases.push(
           `${file.sha1.toUpperCase()} ${absoluteUrl} ${fileSize}`,
@@ -46,6 +55,7 @@ export const updateWin32ReleasesFiles = async ({
   arch,
   store,
   positioner,
+  cachedFileSizes,
 }: Win32HelperOpts) => {
   const root = path.posix.join(app.slug, channel.id, 'win32', arch);
   const releasesKey = path.posix.join(root, 'RELEASES');
@@ -56,11 +66,13 @@ export const updateWin32ReleasesFiles = async ({
       arch,
       store,
       positioner,
+      cachedFileSizes,
     },
     0, // The default RELEASES file ignores all rollout numbers
   );
   await store.putFile(releasesKey, Buffer.from(releases, 'utf8'), true);
 
+  let uploads = [];
   for (let rollout = 0; rollout <= 100; rollout += 1) {
     const rolloutKey = path.posix.join(root, `${rollout}`, 'RELEASES');
     const rolloutReleases = await generateWin32ReleasesStructure(
@@ -70,9 +82,11 @@ export const updateWin32ReleasesFiles = async ({
         arch,
         store,
         positioner,
+        cachedFileSizes,
       },
       rollout,
     );
-    await store.putFile(rolloutKey, Buffer.from(rolloutReleases, 'utf8'), true);
+    uploads.push(store.putFile(rolloutKey, Buffer.from(rolloutReleases, 'utf8'), true));
   }
+  await Promise.all(uploads);
 };
